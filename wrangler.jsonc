@@ -83,5 +83,5 @@
   // `pnpm run deploy` binds it only for "d1", making it first if the account has none of this name, and
   // applying apps/worker/migrations/ to it. `wrangler dev` keeps one on this machine, which
   // `pnpm --filter @ember/worker d1:migrate:local` migrates.
-  "d1_databases": [{ "binding": "DB", "database_name": "ember", "migrations_dir": "apps/worker/migrations","database_id": "739a60f6-f551-452e-b393-a3ac4b2b1b89" }]
+  "d1_databases": [{ "binding": "DB", "database_name": "ember","database_id": "739a60f6-f551-452e-b393-a3ac4b2b1b89", "migrations_dir": "apps/worker/migrations" }]
 }

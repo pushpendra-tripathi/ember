@@ -71,11 +71,16 @@ const dialog = (name: string) => screen.findByRole("dialog", { name });
 const button = (name: string) => screen.getByRole("button", { name });
 const field = (name: string) => screen.getByRole("textbox", { name });
 const siteField = () => field("Address");
-/** The fields of the keys, which aren't the site's, by the key each is for. */
-const keyFields = () => ({ clientId: field("OAuth identifier"), clientSecret: field("OAuth secret"), apiKey: field("API key"), webhookSecret: field("Secret key") });
+/** The fields of the keys, which aren't the site's, by the key each is for, in the order the steps ask for them. */
+const keyFields = () => ({ apiKey: field("API Key"), clientId: field("OAuth Identifier"), clientSecret: field("OAuth Secret"), webhookSecret: field("Secret key") });
 /** What the line under the last key says while there's nothing else to say. */
 const SECRETS_KEPT = "Ember checks the keys with Memberful, then keeps the secrets encrypted.";
 const KEYS_KEPT = "Ember has your site's keys already. Give them all again to change any of them.";
+/** What's said under the site's address, unless Ember keeps the site. */
+const WHERE_THE_SITE_IS = "It's the address in your browser when you're signed in to Memberful's admin, such as yoursite.memberful.com.";
+/** The links to Memberful's forms for a new custom app, and a new webhook, once the site's address is one at memberful.com. */
+const newAppLink = () => screen.queryByRole("link", { name: "create a new app for Ember" });
+const newWebhookLink = () => screen.queryByRole("link", { name: "Settings → Webhooks → Create webhook" });
 
 /** Types the site and keys, as given, and saves them. */
 async function giveKeys(user: ReturnType<typeof userEvent.setup>, keys: MemberfulKeysChange = KEYS) {
@@ -86,6 +91,16 @@ async function giveKeys(user: ReturnType<typeof userEvent.setup>, keys: Memberfu
   for (const [key, input] of Object.entries(keyFields())) {
     await user.clear(input);
     await user.type(input, keys[key as keyof typeof KEYS]);
+  }
+  await user.click(button("Save"));
+}
+
+/** Types `keys` over what their fields hold, the rest staying as they are, and saves them. */
+async function changeKeys(user: ReturnType<typeof userEvent.setup>, keys: Partial<MemberfulKeysChange>) {
+  const fields = { site: siteField(), ...keyFields() };
+  for (const [key, value] of Object.entries(keys)) {
+    await user.clear(fields[key as keyof typeof KEYS]);
+    await user.type(fields[key as keyof typeof KEYS], value);
   }
   await user.click(button("Save"));
 }
@@ -103,20 +118,32 @@ describe("Set up Memberful", () => {
     expect(within(site!).getByRole("heading", { level: 3, name: "Your Memberful site" })).toBeVisible();
     expect(within(site!).getAllByRole("textbox")).toEqual([siteField()]);
     expect(siteField()).toHaveValue("");
-    expect(siteField()).toHaveAttribute("placeholder", "https://example.memberful.com");
+    expect(siteField()).toHaveAccessibleDescription(WHERE_THE_SITE_IS);
     expect(siteField()).toHaveAttribute("inputmode", "url");
 
+    // Each step says what to fill in on Memberful's form by the names Memberful gives its fields.
     expect(within(app!).getByRole("heading", { level: 3, name: "Add a custom app" })).toBeVisible();
     expect(app).toHaveTextContent(
-      "In Memberful, open Settings, then Custom applications, and add one. Check Include OAuth tokens with this application, choose Server-side, and give it this OAuth Redirect URL:",
+      "In Memberful, create a new app for Ember. Don't reuse an existing one, because its redirect URL must point at Ember. Name it Ember, check Include OAuth tokens with this application, choose Server-side Application, and paste this as the OAuth Redirect URL:" +
+        `${location.origin}/auth/memberful/callback` +
+        "Copy the OAuth Redirect URL" +
+        "Choose Server-side even if you plan a mobile app. Ember's server handles the sign-in; phone apps sign in through Ember." +
+        "After you save, Memberful opens the app's page with its keys. Copy them here from top to bottom.",
     );
-    expect(app).toHaveTextContent(`${location.origin}/auth/memberful/callback`);
-    expect(within(app!).getAllByRole("textbox")).toEqual([keyFields().clientId, keyFields().clientSecret, keyFields().apiKey]);
+    // Its keys in the order the app's page shows them.
+    expect(within(app!).getAllByRole("textbox")).toEqual([keyFields().apiKey, keyFields().clientId, keyFields().clientSecret]);
 
     expect(within(webhook!).getByRole("heading", { level: 3, name: "Add a webhook" })).toBeVisible();
-    expect(webhook).toHaveTextContent("Under Settings, then Webhooks, add one that sends the member, subscription and order events to this URL:");
-    expect(webhook).toHaveTextContent(`${location.origin}/webhooks/memberful`);
+    expect(webhook).toHaveTextContent(
+      "So Ember removes access as soon as a membership ends, rather than at its daily check. This is separate from the app. In Memberful, go to Settings → Webhooks → Create webhook. Name it Ember, and paste this as the Endpoint URL:" +
+        `${location.origin}/webhooks/memberful` +
+        "Copy the Endpoint URL" +
+        "Select every event under Member, Order, Subscription, and Plan. Download isn't needed. After you save it, Memberful gives the webhook a secret key. Copy it here.",
+    );
     expect(within(webhook!).getAllByRole("textbox")).toEqual([keyFields().webhookSecret]);
+    // Nothing links to Memberful's forms until there's a site's address to link to.
+    expect(newAppLink()).not.toBeInTheDocument();
+    expect(newWebhookLink()).not.toBeInTheDocument();
     expect(keyFields().webhookSecret).toHaveAccessibleDescription(SECRETS_KEPT);
     expect(screen.queryByText(KEYS_KEPT)).not.toBeInTheDocument();
 
@@ -140,11 +167,57 @@ describe("Set up Memberful", () => {
     await dialog("Set up Memberful");
     await user.click(button("Copy the OAuth Redirect URL"));
     expect(await navigator.clipboard.readText()).toBe(`${location.protocol}//chat.example.com/auth/memberful/callback`);
-    await user.click(button("Copy the webhook URL"));
+    await user.click(button("Copy the Endpoint URL"));
     expect(await navigator.clipboard.readText()).toBe(`${location.protocol}//chat.example.com/webhooks/memberful`);
     // Copying sends nothing.
     expect(screen.getByRole("dialog", { name: "Set up Memberful" })).toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("links to Memberful's forms for a new app and a new webhook, in a new tab, once the site's address is one at memberful.com, however it's typed", async () => {
+    serve();
+    const { user } = showSetup();
+    await dialog("Set up Memberful");
+    const linksTo = (site: string) => {
+      expect(newAppLink()).toHaveAttribute("href", `${site}/admin/settings/custom_applications/new`);
+      expect(newWebhookLink()).toHaveAttribute("href", `${site}/admin/settings/webhooks/new`);
+      for (const link of [newAppLink(), newWebhookLink()]) expect(link).toHaveAttribute("target", "_blank");
+    };
+    // The site's name alone, as Memberful's admin's address names it, is its address at memberful.com.
+    await user.type(siteField(), "Fernwood");
+    linksTo(KEYS.site);
+    for (const given of ["fernwood.memberful.com", "https://fernwood.memberful.com/admin/members"]) {
+      await user.clear(siteField());
+      await user.type(siteField(), given);
+      linksTo(KEYS.site);
+    }
+    // Not at a domain of the site's own, where Memberful may not serve its admin, nor what can't be a site's address.
+    for (const given of ["members.fernwood.example", "http://fernwood.memberful.com", "fern wood"]) {
+      await user.clear(siteField());
+      await user.type(siteField(), given);
+      expect(newAppLink()).not.toBeInTheDocument();
+      expect(newWebhookLink()).not.toBeInTheDocument();
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("saves a site's name alone as its address at memberful.com", async () => {
+    serve();
+    const { user, onSaved } = showSetup();
+    await dialog("Set up Memberful");
+    await giveKeys(user, { ...KEYS, site: " fernwood " });
+    const done = await dialog("Memberful is set up");
+    expect(done).toHaveAccessibleDescription(expect.stringContaining(`members of ${KEYS.site} join`));
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith(SAVED);
+    expect(asked()).toEqual([["PUT /api/account/memberful_keys", KEYS]]);
+  });
+
+  it("links to the forms at the site Ember keeps, or Change keys starts from", async () => {
+    serve();
+    showSetup({ memberful: { ...SAVED, memberfulSite: "https://hollow.memberful.com", memberfulSiteKept: "https://hollow.memberful.com" } });
+    await dialog("Set up Memberful");
+    expect(newAppLink()).toHaveAttribute("href", "https://hollow.memberful.com/admin/settings/custom_applications/new");
+    expect(newWebhookLink()).toHaveAttribute("href", "https://hollow.memberful.com/admin/settings/webhooks/new");
   });
 
   it("hides the secrets as they're typed, in fields that are no password's, and keeps them out of the fields' value attributes, where custom CSS could read them", async () => {
@@ -176,18 +249,19 @@ describe("Set up Memberful", () => {
     await user.type(siteField(), "{Backspace}");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
-    // Keys have no spaces in them.
-    await giveKeys(user, { ...KEYS, clientId: "my custom app" });
+    // Keys have no spaces in them. Only the fields that change are typed again from here: typing all five
+    // each time took the test past its five seconds on a busy machine.
+    await changeKeys(user, { site: KEYS.site, clientId: "my custom app" });
     expect(screen.getByRole("alert")).toHaveTextContent(MEMBERFUL_CLIENT_ID_REFUSED);
     expect(keyFields().clientId).toHaveAttribute("aria-invalid", "true");
     expect(siteField()).toHaveAttribute("aria-invalid", "false");
 
-    await giveKeys(user, { ...KEYS, apiKey: "an API key" });
+    await changeKeys(user, { clientId: KEYS.clientId, apiKey: "an API key" });
     expect(screen.getByRole("alert")).toHaveTextContent(MEMBERFUL_API_KEY_REFUSED);
     expect(keyFields().apiKey).toHaveAccessibleDescription(MEMBERFUL_API_KEY_REFUSED);
 
     // Why the webhook's secret is refused is said in the place of the line under it, so the steps stay as tall.
-    await giveKeys(user, { ...KEYS, webhookSecret: "the secret key" });
+    await changeKeys(user, { apiKey: KEYS.apiKey, webhookSecret: "the secret key" });
     expect(screen.getByRole("alert")).toHaveTextContent(MEMBERFUL_WEBHOOK_SECRET_REFUSED);
     expect(keyFields().webhookSecret).toHaveAccessibleDescription(MEMBERFUL_WEBHOOK_SECRET_REFUSED);
     expect(screen.queryByRole("status")).not.toBeInTheDocument();

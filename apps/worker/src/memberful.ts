@@ -1,19 +1,20 @@
 import {
   MEMBERFUL_CONNECTED,
   MEMBERFUL_PROBLEM_PARAM,
-  workspacePageOf,
+  welcomePath,
   type AccountSettings,
   type MemberfulConnection,
   type MemberfulSignInProblem,
   type UserId,
 } from "@ember/protocol";
 import { memberfulSiteKept, parseMemberfulKeysChange, type MemberfulSaved } from "@ember/protocol/memberful";
-import { authenticate, clientOf, cookieValues, credentialsOf, hostCookie, hostCookieName, newSessionToken, sessionCookie, tokenDigest } from "./auth";
+import { authenticate, clientOf, credentialsOf, newSessionToken, sessionCookie, tokenDigest } from "./auth";
 import { bytesUpTo, jsonBodyOf, MAX_JSON_BODY_BYTES } from "./bodies";
 import { originFor } from "./custom-domain";
-import { fromHex, toBase64url, urlsafeDecode64 } from "./encoding";
+import { fromHex } from "./encoding";
 import type { Env } from "./env";
 import { notFound } from "./error-pages";
+import { backTo as backToPage, backToSignIn as backToSignInWith, expiredStateCookie as expiredCookie, keptStateOf as keptCookieOf, redirect, returnPathOf, stateCookie as cookieKeeping } from "./external-sign-in";
 import {
   deployedMemberfulOf,
   isSubject,
@@ -23,10 +24,11 @@ import {
   type MemberfulKeys,
   type MemberfulSetup,
 } from "./memberful-api";
-import { formAnswer, home, withCookies } from "./pages";
+import { formAnswer, home } from "./pages";
 import { urlOf } from "./request-url";
 import { isToken } from "./secrets";
 import { MEMBERFUL_ROUND_TRIP_MS, workspace } from "./workspace";
+import { NOTHING_KEPT } from "./workspace-store";
 
 // Signing in with Memberful. Memberful speaks OAuth 2.0 but not OpenID Connect, so this follows its
 // guide for a server-side custom app (memberful.com/docs/api-reference/sign-in-for-apps-via-oauth): Sign
@@ -47,8 +49,6 @@ import { MEMBERFUL_ROUND_TRIP_MS, workspace } from "./workspace";
 const STATE_COOKIE = "memberful_state";
 /** How long that takes at most: long enough to sign in at Memberful, or sign up there. */
 const STATE_MAX_AGE_SECONDS = MEMBERFUL_ROUND_TRIP_MS / 1000;
-/** The longest page to come back to that the cookie keeps. Any longer, and signing in goes home. */
-const MAX_RETURN_PATH_LENGTH = 1024;
 /** Where Memberful signs a webhook: the HMAC-SHA256 of its body, under the webhook's secret, in hex. */
 const SIGNATURE_HEADER = "X-Memberful-Webhook-Signature";
 
@@ -72,20 +72,12 @@ export async function memberfulFor(env: Env): Promise<MemberfulSetup | null> {
 /** The Memberful site whose members sign in, as `memberfulFor` has it, or null without its keys. */
 export const memberfulSiteFor = async (env: Env) => (await memberfulFor(env))?.site ?? null;
 
-/** A redirect to `location`, which no cache keeps, since it signs someone in, or starts to. */
-const redirect = (location: string, ...cookies: string[]) =>
-  withCookies(new Response(null, { status: 302, headers: { Location: location, "Cache-Control": "no-store" } }), ...cookies);
-
 /** Sends the browser back to sign in, which says why signing in with Memberful didn't work. */
-const backToSignIn = (request: Request, problem: MemberfulSignInProblem) =>
-  redirect(new URL(`/session/new?${MEMBERFUL_PROBLEM_PARAM}=${problem}`, request.url).href);
+const backToSignIn = (request: Request, problem: MemberfulSignInProblem) => backToSignInWith(request, MEMBERFUL_PROBLEM_PARAM, problem);
 
 /** Sends the browser back to `returnPath`, a page of the workspace, which says how connecting Memberful went: `outcome`. */
-function backTo(request: Request, returnPath: string, outcome: MemberfulSignInProblem | typeof MEMBERFUL_CONNECTED): Response {
-  const url = new URL(returnPath, request.url);
-  url.searchParams.set(MEMBERFUL_PROBLEM_PARAM, outcome);
-  return redirect(url.href);
-}
+const backTo = (request: Request, returnPath: string, outcome: MemberfulSignInProblem | typeof MEMBERFUL_CONNECTED) =>
+  backToPage(request, returnPath, MEMBERFUL_PROBLEM_PARAM, outcome);
 
 /** Where to sign in at the Memberful site, which sends the browser back to the callback with `state`. */
 function authorizationOf({ site, clientId }: MemberfulKeys, state: string): string {
@@ -95,42 +87,18 @@ function authorizationOf({ site, clientId }: MemberfulKeys, state: string): stri
 }
 
 /**
- * The page of the workspace at `origin` that `returnTo` names, its query and fragment included, or "/"
- * for anything else, so that signing in only ever opens a page here, or for one too long to keep, as
- * its address writes it, with every character that isn't ASCII escaped.
- */
-function returnPathOf(returnTo: string | null, origin: string): string {
-  const url = returnTo === null ? null : URL.parse(returnTo, origin);
-  const path = url?.origin === origin && workspacePageOf(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
-  return path.length <= MAX_RETURN_PATH_LENGTH ? path : "/";
-}
-
-/** What the state cookie of a connection ends with, after the page to come back to. */
-const CONNECTING = "connecting";
-
-/**
  * The `Set-Cookie` that keeps a sign-in's `state` and the page to come back to, `returnPath`, and whether
  * it's `connecting` an account, so that the callback never takes one whose connection has gone for a
  * sign-in.
  */
 const stateCookie = (request: Request, state: string, returnPath: string, connecting = false) =>
-  hostCookie(request, STATE_COOKIE, `${state}.${toBase64url(encoder.encode(returnPath))}${connecting ? `.${CONNECTING}` : ""}`, STATE_MAX_AGE_SECONDS);
+  cookieKeeping(request, STATE_COOKIE, { state, returnPath, connecting, extras: [] }, STATE_MAX_AGE_SECONDS);
 
 /** The `Set-Cookie` that forgets it. */
-const expiredStateCookie = (request: Request) => hostCookie(request, STATE_COOKIE, "", 0);
+const expiredStateCookie = (request: Request) => expiredCookie(request, STATE_COOKIE);
 
 /** The state, the page to come back to, and whether it's connecting an account, that the request's cookie keeps, if it keeps any. */
-function keptStateOf(request: Request): { state: string; returnPath: string; connecting: boolean } | null {
-  const [kept] = cookieValues(request, hostCookieName(request, STATE_COOKIE));
-  const [state, encoded, connecting] = kept?.split(".") ?? [];
-  const bytes = encoded === undefined ? null : urlsafeDecode64(encoded);
-  if (!state || !bytes) return null;
-  try {
-    return { state, returnPath: returnPathOf(decoder.decode(bytes), urlOf(request).origin), connecting: connecting === CONNECTING };
-  } catch {
-    return null;
-  }
-}
+const keptStateOf = (request: Request) => keptCookieOf(request, STATE_COOKIE);
 
 /**
  * `GET /auth/memberful`, Sign in with Memberful: sends the browser to sign in at the Memberful site,
@@ -158,9 +126,9 @@ export async function startMemberfulSignIn(request: Request, env: Env): Promise<
  * the password they gave against, or "" without one, to an account at the Memberful site, to come back
  * to the page `returnTo` names: where to sign in there, and the `Set-Cookie` that keeps the state it
  * goes with, whose digest the Workspace keeps for the callback. Null unless Ember has Memberful's keys
- * and the Workspace kept it (`startMemberfulConnection`). Asked at an address Ember has moved from to its
- * custom domain, as a tab left open there is, it starts nothing, and answers that page at the custom
- * domain instead, to sign in and connect there.
+ * and the Workspace kept it (`startConnection`). Asked at an address Ember has moved from to its custom
+ * domain, as a tab left open there is, it starts nothing, and answers that page at the custom domain
+ * instead, to sign in and connect there.
  */
 export async function memberfulConnectionFor(
   request: Request,
@@ -177,16 +145,16 @@ export async function memberfulConnectionFor(
   const origin = originFor(request, (await workspace(env).account())?.customDomain ?? null);
   if (origin !== url.origin) return { connection: { memberfulConnection: new URL(returnPath, origin).href }, cookie: null };
   const state = newSessionToken();
-  if (!(await workspace(env).startMemberfulConnection(userId, passwordDigest, await tokenDigest(state, env.SESSION_SECRET), keys.site))) return null;
+  if (!(await workspace(env).startConnection("memberful", userId, passwordDigest, await tokenDigest(state, env.SESSION_SECRET), keys.site))) return null;
   return { connection: { memberfulConnection: authorizationOf(keys, state) }, cookie: stateCookie(request, state, returnPath, true) };
 }
 
 /**
  * `GET /auth/memberful/callback`, where Memberful sends the browser back: signs it in as whoever signed
- * in there (`Workspace.signInWithMemberful`), or connects their account there to the one here that the
- * state started connecting (`Workspace.connectMemberful`), and opens the page it was started from, or
- * else goes back to sign in, or to that page when the browser is signed in, which says why not. Each
- * state is good for one try, whatever comes of it.
+ * in there (`Workspace.signInElsewhere`), or connects their account there to the one here that the
+ * state started connecting (`Workspace.connectElsewhere`), and opens the page it was started from, by
+ * way of the welcome page for someone new, or else goes back to sign in, or to that page when the
+ * browser is signed in, which says why not. Each state is good for one try, whatever comes of it.
  */
 export async function finishMemberfulSignIn(request: Request, env: Env): Promise<Response> {
   if (request.method !== "GET") return notFound(request);
@@ -206,7 +174,7 @@ async function signedInWithMemberful(request: Request, env: Env): Promise<Respon
   // Each try counts against the address's sign-in limit, before Memberful is asked anything.
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
   const connection = kept.connecting ? await tokenDigest(kept.state, env.SESSION_SECRET) : null;
-  const [begun, signedIn] = await Promise.all([workspace(env).beginMemberfulSignIn(ip, connection), authenticate(request, env)]);
+  const [begun, signedIn] = await Promise.all([workspace(env).beginSignInElsewhere(ip, connection), authenticate(request, env)]);
   const back = (problem: MemberfulSignInProblem) => (signedIn ? backTo(request, kept.returnPath, problem) : backToSignIn(request, problem));
   if (begun === "limited") return back("refused");
   if (begun === "expired") return back("failed");
@@ -219,9 +187,11 @@ async function signedInWithMemberful(request: Request, env: Env): Promise<Respon
   const staying = connecting !== null && signedIn?.user.id === connecting.userId;
   const user =
     connecting === null
-      ? await workspace(env).signInWithMemberful(keys.site, member, begunAt, digest, clientOf(request))
-      : await workspace(env).connectMemberful(keys.site, member, begunAt, connecting, staying ? null : digest, clientOf(request));
+      ? await workspace(env).signInElsewhere("memberful", keys.site, member, begunAt, digest, clientOf(request), NOTHING_KEPT)
+      : await workspace(env).connectElsewhere("memberful", keys.site, member, begunAt, connecting, staying ? null : digest, clientOf(request), NOTHING_KEPT);
   if (user === "connected") return backTo(request, kept.returnPath, MEMBERFUL_CONNECTED);
+  // Someone new chooses how people here see them first.
+  if (user === "joined") return redirect(new URL(welcomePath(kept.returnPath), request.url).href, sessionCookie(request, token));
   if (typeof user === "string") return back(user);
   return redirect(new URL(kept.returnPath, request.url).href, sessionCookie(request, token));
 }
@@ -230,9 +200,14 @@ async function signedInWithMemberful(request: Request, env: Env): Promise<Respon
  * `POST /webhooks/memberful`, where the Memberful site says a member's account, subscription or order
  * changed: once its signature checks out, the Workspace queues checking that member's membership with
  * the admin API, if they're linked to someone here, rather than trusting what it says, as Memberful
- * advises, since its webhooks can come in any order (memberful.com/docs/api-reference/webhooks). Answers
- * 404 without the webhook's secret and the API key to check with, 401 to a signature that doesn't check
- * out, 413 to a body over the limit, and 204 to anything else, which Memberful takes as delivered.
+ * advises, since its webhooks can come in any order (memberful.com/docs/api-reference/webhooks). So any
+ * event about a member has their membership checked, whatever it's called: one that ends it, as a
+ * subscription deactivated or deleted, an order refunded or suspended, or the member deleted, suspends
+ * them once the check finds it ended, and one that renews it lets them back. Answers 404 without the
+ * webhook's secret and the API key to check with, 401 to a signature that doesn't check out, 413 to a
+ * body over the limit, and 200 to anything else, an event about nobody's membership, such as a plan's
+ * or a download's, or one Ember has never heard of, too: Memberful tries again for a day whatever isn't
+ * answered with a success, then deletes the webhook if it's still failing three days later.
  */
 export async function memberfulWebhook(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return notFound(request);
@@ -246,7 +221,7 @@ export async function memberfulWebhook(request: Request, env: Env): Promise<Resp
   if (!(await isSignedWith(webhooks.secret, body, request.headers.get(SIGNATURE_HEADER)))) return new Response(null, { status: 401 });
   const subject = subjectOf(parsed(body));
   if (subject !== null) await workspace(env).queueMembershipCheck(webhooks.api.site, subject);
-  return new Response(null, { status: 204 });
+  return new Response(null, { status: 200 });
 }
 
 /** Whether `signature` is the hex HMAC-SHA256 of `body` under `secret`, compared in constant time. */
@@ -269,7 +244,8 @@ function parsed(body: ArrayBuffer): unknown {
 /**
  * The member a webhook's payload is about, by their member id, where Memberful's WordPress plugin finds
  * it: `member.id` for a member's event, and the `member` of the subscription or order an event of theirs
- * is about. Null for anything else, such as a plan's event, which says nothing about anyone's membership.
+ * is about. Null for anything else, such as a plan's event, whose `subscription` is the plan's price,
+ * with no member, or a download's, which say nothing about anyone's membership.
  */
 function subjectOf(payload: unknown): string | null {
   const { member, subscription, order } = (typeof payload === "object" && payload !== null ? payload : {}) as Record<string, unknown>;

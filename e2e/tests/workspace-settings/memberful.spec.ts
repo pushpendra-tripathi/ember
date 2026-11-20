@@ -1,8 +1,8 @@
-import { MEMBERFUL_CALLBACK_PATH, MEMBERFUL_SIGN_IN_PROBLEMS, MEMBERFUL_WEBHOOK_PATH, type Account, type WorkspaceSettings } from "@ember/protocol";
+import { MEMBERFUL_CALLBACK_PATH, MEMBERFUL_SIGN_IN_PROBLEMS, MEMBERFUL_WEBHOOK_PATH, usernameFrom, type Account, type WorkspaceSettings } from "@ember/protocol";
 import { MEMBERFUL_API_KEY_UNKNOWN, MEMBERFUL_CLIENT_UNKNOWN } from "@ember/protocol/memberful";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, test } from "../../fixtures";
-import { administratorSession, cookieHeader, logOut, SAME_ORIGIN, signInAsAdministrator, useOwnAddress } from "../../fixtures";
+import { administratorSession, cookieHeader, drawnPicture, logOut, SAME_ORIGIN, shownPicture, signInAsAdministrator, useOwnAddress } from "../../fixtures";
 import { MEMBERFUL_KEYS, MEMBERFUL_SITE } from "../../projects/workspace-settings";
 import { sendWebhook, startFakeMemberful, type FakeMember, type FakeMemberful } from "./fake-memberful";
 
@@ -80,6 +80,15 @@ async function signInWithMemberful(page: Page, member: FakeMember): Promise<void
   await signInThereAs(page, member);
 }
 
+/** The page someone new comes to from Memberful, before the page they signed in from. */
+const welcomeHeading = (page: Page) => page.getByRole("heading", { level: 1, name: /^Welcome to / });
+
+/** Goes on from the welcome page, as someone new who keeps their photo, name and username as they are. */
+async function goOnFromWelcome(page: Page): Promise<void> {
+  await expect(welcomeHeading(page)).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+}
+
 const composer = (page: Page) => page.getByRole("textbox", { name: "Write a message" });
 const memberfulSection = (page: Page) => page.getByRole("region", { name: "Memberful" });
 /** A name no earlier run of a server kept between runs has used. */
@@ -101,19 +110,29 @@ test.describe("Set up Memberful", () => {
     // Ember's addresses, to give Memberful's custom app and webhook.
     await expect(setup.getByRole("listitem").nth(1)).toContainText(`${baseURL}${MEMBERFUL_CALLBACK_PATH}`);
     await expect(setup.getByRole("listitem").nth(2)).toContainText(`${baseURL}${MEMBERFUL_WEBHOOK_PATH}`);
-    await setup.getByLabel("Address", { exact: true }).fill(MEMBERFUL_SITE);
-    await setup.getByLabel("OAuth identifier", { exact: true }).fill(MEMBERFUL_KEYS.clientId);
-    await setup.getByLabel("OAuth secret", { exact: true }).fill("not-the-apps-secret");
-    await setup.getByLabel("API key", { exact: true }).fill("not-the-apps-api-key");
+    // A site's name alone is its address at memberful.com, where the steps link to its admin's forms for the app and the webhook.
+    const address = setup.getByLabel("Address", { exact: true });
+    await address.fill("fernwood");
+    await expect(setup.getByRole("link", { name: "create a new app for Ember" })).toHaveAttribute("href", "https://fernwood.memberful.com/admin/settings/custom_applications/new");
+    await expect(setup.getByRole("link", { name: "Settings → Webhooks → Create webhook" })).toHaveAttribute("href", "https://fernwood.memberful.com/admin/settings/webhooks/new");
+    // Nothing links while what's typed can't be a site's address, though Chrome reads one with a space as a host, nor at
+    // a site that isn't at memberful.com, as the specs' own isn't.
+    await address.fill("fern wood");
+    await expect(setup.getByRole("link")).toHaveCount(0);
+    await address.fill(MEMBERFUL_SITE);
+    await expect(setup.getByRole("link")).toHaveCount(0);
+    await setup.getByLabel("API Key", { exact: true }).fill("not-the-apps-api-key");
+    await setup.getByLabel("OAuth Identifier", { exact: true }).fill(MEMBERFUL_KEYS.clientId);
+    await setup.getByLabel("OAuth Secret", { exact: true }).fill("not-the-apps-secret");
     await setup.getByLabel("Secret key", { exact: true }).fill(MEMBERFUL_KEYS.webhookSecret);
     const save = setup.getByRole("button", { name: "Save" });
     await save.click();
     // Memberful's admin API doesn't take the API key, and then its token endpoint doesn't know the app with that secret.
     await expect(setup.getByRole("alert")).toHaveText(MEMBERFUL_API_KEY_UNKNOWN);
-    await setup.getByLabel("API key", { exact: true }).fill(MEMBERFUL_KEYS.apiKey);
+    await setup.getByLabel("API Key", { exact: true }).fill(MEMBERFUL_KEYS.apiKey);
     await save.click();
     await expect(setup.getByRole("alert")).toHaveText(MEMBERFUL_CLIENT_UNKNOWN);
-    await setup.getByLabel("OAuth secret", { exact: true }).fill(MEMBERFUL_KEYS.clientSecret);
+    await setup.getByLabel("OAuth Secret", { exact: true }).fill(MEMBERFUL_KEYS.clientSecret);
     await save.click();
 
     const done = page.getByRole("dialog", { name: "Memberful is set up" });
@@ -130,17 +149,32 @@ test.describe("Set up Memberful", () => {
 });
 
 test.describe("Sign in with Memberful", () => {
-  test("a member of the Memberful site signs in as someone new, and as themselves from then on", async ({ page, request }) => {
+  test("a member of the Memberful site signs in as someone new, choosing their photo, name and username first, and as themselves from then on", async ({ page, request }) => {
     const member = site.add(nameFor("Grace"));
     await turnMemberful(request, true);
     await useOwnAddress(page);
     await page.goto("/users/me/profile");
     await signInWithMemberful(page, member);
-    // Back on the page they were sent to sign in from.
+    // Welcomed first, with the name Memberful has for them, and a username made from it.
+    await expect(welcomeHeading(page)).toBeVisible();
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue(member.fullName);
+    await expect(page.getByLabel("Username")).toHaveValue(usernameFrom(member.fullName));
+    const name = `${member.fullName} Hopper`;
+    const username = `amazing.${crypto.randomUUID().slice(0, 8)}`;
+    await page.getByLabel("Name", { exact: true }).fill(name);
+    await page.getByLabel("Username").fill(` @${username.toUpperCase()}`);
+    await expect(page.getByLabel("Username")).toHaveValue(username);
+    await page.getByLabel("Upload photo").setInputFiles(await drawnPicture(page, "portrait.png", 300, 600));
+    await expect(page.getByRole("img", { name: "Your profile photo" })).toHaveAttribute("src", /^blob:/);
+    await page.getByRole("button", { name: "Continue" }).click();
+
+    // Then back on the page they were sent to sign in from, as they chose to be.
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(name);
+    await expect(page.getByLabel("Username")).toHaveValue(username);
     await expect(page.getByLabel("Email address")).toHaveValue(member.email);
+    expect(await shownPicture(page.getByRole("img", { name: "Your avatar" }))).toEqual({ type: "image/webp", width: 256, height: 512 });
     // Their profile names the account, which is how they sign in, so it offers them no password, and nothing to disconnect.
-    await expect(memberfulSection(page)).toContainText(`Connected to Memberful as ${member.fullName} (${member.email}), so you sign in with it.`);
+    await expect(memberfulSection(page)).toContainText(`Connected as ${member.fullName} (${member.email}). You sign in with Memberful.`);
     await expect(page.getByLabel("New password")).toHaveCount(0);
     await expect(memberfulSection(page).getByRole("button", { name: "Disconnect Memberful" })).toHaveCount(0);
 
@@ -162,6 +196,7 @@ test.describe("Sign in with Memberful", () => {
     await logOut(page);
     await expect(page.getByLabel("Email address")).toBeVisible();
     await signInWithMemberful(page, member);
+    await goOnFromWelcome(page);
     await expect(composer(page)).toBeVisible();
 
     await turnMemberful(request, false);
@@ -215,6 +250,7 @@ test.describe("Memberful memberships", () => {
     await useOwnAddress(page);
     await page.goto("/");
     await signInWithMemberful(page, member);
+    await goOnFromWelcome(page);
     await expect(composer(page)).toBeVisible();
 
     // Memberful's webhook says it changed, and the Workspace asks Memberful's admin API, which says it lapsed.
@@ -239,12 +275,12 @@ test.describe("Connect Memberful", () => {
 
     await page.goto("/users/me/profile");
     const section = memberfulSection(page);
-    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in as yourself.");
+    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in.");
     await section.getByLabel("Password").fill(joiner.password);
     await section.getByRole("button", { name: "Connect Memberful" }).click();
     await signInThereAs(page, member);
     await expect(page.getByRole("alert")).toHaveText("Your Memberful account is connected.");
-    await expect(section).toContainText(`Connected to Memberful as ${member.fullName} (${member.email}), so you sign in with it.`);
+    await expect(section).toContainText(`Connected as ${member.fullName} (${member.email}). You sign in with Memberful.`);
     expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe("/users/me/profile");
 
     // Signing in with Memberful is signing in as themselves, with the account they had.
@@ -258,7 +294,7 @@ test.describe("Connect Memberful", () => {
     await section.getByLabel("Password").fill(joiner.password);
     await section.getByRole("button", { name: "Disconnect Memberful" }).click();
     await expect(page.getByRole("alert")).toHaveText("Your Memberful account is disconnected.");
-    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in as yourself.");
+    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in.");
     await expect(page.getByLabel("Email address")).toHaveValue(joiner.emailAddress);
   });
 
@@ -279,12 +315,12 @@ test.describe("Connect Memberful", () => {
     await page.getByLabel("Email address").fill(joiner.emailAddress);
     await page.getByLabel("Password").fill(joiner.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await expect(page.getByText("Members sign in with Memberful now. Connect your Memberful account to keep signing in as yourself.")).toBeVisible();
+    await expect(page.getByText("This workspace now uses Memberful. Connect your Memberful account to keep signing in.")).toBeVisible();
     await page.getByRole("link", { name: "Connect Memberful" }).click();
     await signInThereAs(page, member);
 
     // Signed in as themselves, on the page they were sent to sign in from.
     await expect(page.getByLabel("Email address")).toHaveValue(joiner.emailAddress);
-    await expect(memberfulSection(page)).toContainText(`Connected to Memberful as ${member.fullName} (${joiner.emailAddress}), so you sign in with it.`);
+    await expect(memberfulSection(page)).toContainText(`Connected as ${member.fullName} (${joiner.emailAddress}). You sign in with Memberful.`);
   });
 });

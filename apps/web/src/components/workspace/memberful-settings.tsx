@@ -3,7 +3,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { WORKERS_DASHBOARD } from "./custom-domain-settings";
 import { BUTTON } from "./email-settings";
-import { useMemberfulAddresses } from "./memberful-setup";
+import { MemberfulLink, memberfulNewWebhook, useMemberfulAddresses } from "./memberful-setup";
 
 // The Memberful card in Membership's ways to join: an administrator lets the members of a Memberful site
 // join and sign in with their accounts there, with the keys of a custom app there that Set up Memberful
@@ -37,6 +37,10 @@ interface Props {
   membersOnlySaving?: boolean;
   /** Why the switch can't be moved while another way to join is on, said in place of what it does, or null. */
   setAside?: string | null;
+  /** What's said in place of Members only's switch while SSO only is on, when the switch turns both on and off, or null. */
+  beside?: string | null;
+  /** What's said in place of what it does while SSO only closes it, or null. */
+  closed?: string | null;
 }
 
 /**
@@ -57,6 +61,8 @@ export function MemberfulSettings({
   memberfulSaving = false,
   membersOnlySaving = false,
   setAside = null,
+  beside = null,
+  closed = null,
 }: Props) {
   const { redirectUrl, webhookUrl } = useMemberfulAddresses();
   // Without the keys, which the server would refuse it for, turning it on sets it up first.
@@ -76,12 +82,17 @@ export function MemberfulSettings({
               "It's on, but Ember no longer has your Memberful site's keys, so nobody can sign in with Memberful until it's set up again."
             ) : setAside !== null ? (
               setAside
+            ) : closed !== null && site !== null ? (
+              closed
             ) : site === null ? (
               "Members of a Memberful site join and sign in with their Memberful account. Turning this on sets up Memberful first."
             ) : (
               <>
-                Members of <strong className="wrap-anywhere">{site}</strong> join and sign in with their Memberful account. Turned off, it lets nobody new
-                join, but those who did keep signing in with it.
+                Members of <strong className="wrap-anywhere">{site}</strong> join and sign in with their Memberful account.
+                {/* Beside SSO only, turning it off turns Members only off too, which closes it. */}
+                {beside === null
+                  ? " Turned off, it lets nobody new join, but those who did keep signing in with it."
+                  : " Turned off, it lets nobody in while SSO only is on, not even those who joined with it."}
                 {webhooks && " A member whose membership lapses is signed out until it's renewed."}
               </>
             )}
@@ -90,12 +101,14 @@ export function MemberfulSettings({
         <Switch
           checked={checked}
           onCheckedChange={switchTo}
-          disabled={setAside !== null || membersOnlySaving}
+          // Beside SSO only, it saves Members only's setting or its own, so it waits for either's move.
+          disabled={setAside !== null || membersOnlySaving || (beside !== null && memberfulSaving)}
           aria-labelledby="memberful-heading"
           aria-describedby="memberful-description"
         />
       </div>
-      {shown && site !== null && (
+      {shown && site !== null && beside !== null && <p className={cn(NOTE, "border-t pt-3")}>{beside}</p>}
+      {shown && site !== null && beside === null && (
         <div className="flex items-center gap-x-[1ch] gap-y-4 border-t pt-3">
           <div className="min-w-0 flex-1">
             <div id="members-only-heading">Members only</div>
@@ -117,7 +130,7 @@ export function MemberfulSettings({
         <SetUpButton onSetUp={onSetUp} label="Set up Memberful" />
       ) : (
         <>
-          {keys === "secret" && !webhooks && <WebhookSteps webhookUrl={webhookUrl} />}
+          {keys === "secret" && !webhooks && <WebhookSteps site={site} webhookUrl={webhookUrl} />}
           <p className={NOTE}>
             {webhooks ? (
               <>
@@ -152,20 +165,25 @@ function SetUpButton({ onSetUp, label }: { onSetUp: () => void; label: string })
 
 /**
  * The steps to hear Memberful's webhooks while the deployment's secrets give Ember the custom app's keys
- * without what hearing them takes: a webhook in Memberful, then two more secrets, its own, to check it
- * came from Memberful, and the custom app's API key, to check what it says.
+ * without what hearing them takes: a webhook at the Memberful site `site`, as Set up Memberful's last step
+ * says, then two more secrets, its own, to check it came from Memberful, and the custom app's API key, to
+ * check what it says.
  */
-function WebhookSteps({ webhookUrl }: { webhookUrl: string }) {
+function WebhookSteps({ site, webhookUrl }: { site: string | null; webhookUrl: string }) {
   return (
     <>
       <p>A member whose membership lapses can't sign in again, but stays signed in where they are until Ember hears Memberful's webhooks.</p>
       <ol aria-label="Steps to sign out members whose membership lapses" className="flex list-decimal flex-col gap-2 ps-5">
         <li>
-          In Memberful, open <em>Settings</em>, <em>Webhooks</em>, and add one that sends the member, subscription and order events to{" "}
-          <strong className="wrap-anywhere">{webhookUrl}</strong>.
+          In Memberful, go to{" "}
+          <MemberfulLink href={memberfulNewWebhook(site)}>
+            <em>Settings</em> → <em>Webhooks</em> → <em>Create webhook</em>
+          </MemberfulLink>
+          . Name it <strong>Ember</strong>, paste <strong className="wrap-anywhere">{webhookUrl}</strong> as the <em>Endpoint URL</em>, and select every
+          event under <em>Member</em>, <em>Order</em>, <em>Subscription</em>, and <em>Plan</em>. <em>Download</em> isn't needed.
         </li>
         <li>
-          Give this Worker two more secrets: the webhook's secret key as <code>MEMBERFUL_WEBHOOK_SECRET</code>, and the custom app's API key as{" "}
+          Give this Worker two more secrets: the webhook's secret key as <code>MEMBERFUL_WEBHOOK_SECRET</code>, and the custom app's API Key as{" "}
           <code>MEMBERFUL_API_KEY</code>.{" "}
           <a href={WORKERS_DASHBOARD} target="_blank" rel="noopener" className="underline">
             Open the Cloudflare dashboard

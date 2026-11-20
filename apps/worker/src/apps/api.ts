@@ -1,12 +1,15 @@
 import {
   APP_CHANGED,
+  APP_IS_EMBER,
   APP_SIGN_IN_ENDED,
   APP_SIGNED_IN,
+  APP_TOKEN_STAYS,
   APPS_FORBIDDEN,
   APPS_FULL,
   TOOL_GONE,
   YOUR_APP_GONE,
   YOUR_APPS_FORBIDDEN,
+  isAtHost,
   parseAppChanges,
   parseAppClient,
   parseAppSignInReturn,
@@ -35,7 +38,7 @@ import type { Env } from "../env";
 import { notFound } from "../error-pages";
 import { anyOtherPage, formAnswer } from "../pages";
 import { urlOf } from "../request-url";
-import { workspace, type BegunAppSignIn, type Credentials } from "../workspace";
+import { movesItsToken, workspace, type BegunAppSignIn, type Credentials } from "../workspace";
 import { appConnector } from "./connector";
 import type { ReadApp } from "./mcp";
 import { CLIENT_DOCUMENT_PATH, clientMetadataOf } from "./oauth";
@@ -85,13 +88,15 @@ export async function showApp(request: Request, env: Env, appId: AppId): Promise
  * read its tools there, with the token, if one's given, answering 201 with the app as its page shows
  * it. Someone who isn't an administrator hears so before anything they sent is read, and Ember AI being
  * off, or as many apps as there can be, is refused before the server is asked. A field that can't be
- * what it's for, or that the server refuses, is refused on that field.
+ * what it's for, or that the server refuses, is refused on that field, as is Ember's own address.
  */
 export async function connectApp(request: Request, env: Env): Promise<Response> {
   const credentials = await administratorOf(request, env, APPS_FORBIDDEN);
   if (credentials instanceof Response) return credentials;
   const app = parseNewApp(await jsonBodyOf(request));
   if ("error" in app) return formAnswer(app, 422);
+  const own = await ownAddressRefusal(request, env, app.url);
+  if (own) return formAnswer(own, 422);
   const ember = workspace(env);
   const slot = await ember.appSlot(credentials);
   if (slot !== true) return refused(slot);
@@ -115,6 +120,8 @@ export async function beginNewAppSignIn(request: Request, env: Env): Promise<Res
   if ("error" in app) return formAnswer(app, 422);
   const client = parseAppClient(body);
   if ("error" in client) return formAnswer(client, 422);
+  const own = await ownAddressRefusal(request, env, app.url);
+  if (own) return formAnswer(own, 422);
   const slot = await workspace(env).appSlot(credentials);
   if (slot !== true) return refused(slot);
   return begunSignIn(request, env, credentials, { appId: null, name: app.name, url: app.url }, clientGiven(client, null), null, false);
@@ -241,6 +248,8 @@ export function clientDocument(request: Request): Response {
  * As with connecting one, someone who isn't an administrator hears so first, then that Ember AI is off,
  * then that there's no such app, before anything that was sent is read. An app that's signed in to
  * keeps its address and takes no token: Ember's sign-in is to the server there, and is sent nowhere else.
+ * A token, too, goes only to the address it was given for, so another address needs it given again, or
+ * "" for none.
  */
 export async function changeApp(request: Request, env: Env, appId: AppId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -250,11 +259,14 @@ export async function changeApp(request: Request, env: Env, appId: AppId): Promi
   if (typeof access === "string") return refused(access);
   const changes = parseAppChanges(await jsonBodyOf(request));
   if ("error" in changes) return formAnswer(changes, 422);
+  const own = changes.url === undefined ? null : await ownAddressRefusal(request, env, changes.url);
+  if (own) return formAnswer(own, 422);
   const url = changes.url ?? access.url;
   if (access.signedIn) {
     if (url !== access.url || changes.token !== undefined) return formAnswer(signedInRefusal(url !== access.url), 422);
     return appAnswer(await ember.changeApp(credentials, appId, changes, null));
   }
+  if (movesItsToken(access, changes)) return formAnswer(TOKEN_STAYS, 422);
   const token = changes.token === undefined ? (access.key?.token ?? null) : changes.token === "" ? null : changes.token;
   if (url === access.url && token === (access.key?.token ?? null)) return appAnswer(await ember.changeApp(credentials, appId, changes, null));
   const read = await appConnector(env).read(url, token === null ? null : { token });
@@ -317,11 +329,24 @@ function agentToolsAnswer(apps: OfferedApp[] | Refusal): Response {
   return Array.isArray(apps) ? Response.json({ apps } satisfies AgentTools, { headers: PRIVATE }) : refused(apps);
 }
 
+/**
+ * Why an app at `url` can't be connected, said on its address: it's this Ember's own, the address
+ * `request` came to or another that Ember knows reaches it, whose MCP server would have the agents read
+ * DMs and private rooms, as the administrator's sign-in to it can, for whoever asks them.
+ */
+async function ownAddressRefusal(request: Request, env: Env, url: string): Promise<AppRefused | null> {
+  const hosts = [urlOf(request).host, ...(await workspace(env).ownAddresses())];
+  return isAtHost(url, hosts) ? { error: APP_IS_EMBER, field: "url" } : null;
+}
+
 /** Why a request about apps isn't done: there's no such app, agent or tool, or the person asking can't, or not now. */
-type Refusal = "off" | "full" | "changed" | "signed in" | "gone" | "not found" | "forbidden" | null;
+type Refusal = "off" | "full" | "changed" | "signed in" | "token stays" | "gone" | "not found" | "forbidden" | null;
 
 /** Why an app that's signed in to keeps its address, or else takes no token, said on that field. */
 const signedInRefusal = (moved: boolean): AppRefused => ({ error: APP_SIGNED_IN, field: moved ? "url" : "token" });
+
+/** Why an app's token isn't sent to another address than the one it was given for, said on its field. */
+const TOKEN_STAYS: AppRefused = { error: APP_TOKEN_STAYS, field: "token" };
 
 /** What a request about an app answers: the app as its page then shows it, with `status`, or why it was refused. */
 function appAnswer(app: App | Refusal, status = 200): Response {
@@ -340,5 +365,6 @@ function refused(why: Refusal): Response {
   if (why === "forbidden") return problem(403, APPS_FORBIDDEN);
   if (why === "not found") return problem(404, "Not found");
   if (why === "signed in") return formAnswer(signedInRefusal(true), 422);
+  if (why === "token stays") return formAnswer(TOKEN_STAYS, 422);
   return problem(409, why === "off" ? ASSISTANT_OFF : why === "changed" ? APP_CHANGED : why === "gone" ? TOOL_GONE : APPS_FULL);
 }

@@ -78,11 +78,13 @@ import botRooms from "../migrations/0077_bot_rooms.sql";
 import clearedReports from "../migrations/0078_cleared_reports.sql";
 import sso from "../migrations/0079_sso.sql";
 import pendingReaders from "../migrations/0080_pending_readers.sql";
+import sidebarSections from "../migrations/0081_sidebar_sections.sql";
 import searchIndex from "../search-migrations/0001_search_index.sql";
 import searchResults from "../search-migrations/0002_search_results.sql";
 import searchFilters from "../search-migrations/0003_search_filters.sql";
 import searchFiltersByRoom from "../search-migrations/0004_search_filters_by_room.sql";
 import searchReaders from "../search-migrations/0005_search_readers.sql";
+import searchRekeys from "../search-migrations/0006_search_rekeys.sql";
 
 /**
  * The kind of Durable Object whose tables a migration creates or changes. On DO SQLite each object
@@ -184,6 +186,7 @@ export const MIGRATIONS: Migration[] = [
   { name: "0078_cleared_reports.sql", scope: "workspace", sql: clearedReports },
   { name: "0079_sso.sql", scope: "workspace", sql: sso },
   { name: "0080_pending_readers.sql", scope: "workspace", sql: pendingReaders },
+  { name: "0081_sidebar_sections.sql", scope: "workspace", sql: sidebarSections },
 ];
 
 /**
@@ -198,6 +201,7 @@ export const SEARCH_MIGRATIONS: Migration[] = [
   { name: "0003_search_filters.sql", scope: "search", sql: searchFilters },
   { name: "0004_search_filters_by_room.sql", scope: "search", sql: searchFiltersByRoom },
   { name: "0005_search_readers.sql", scope: "search", sql: searchReaders },
+  { name: "0006_search_rekeys.sql", scope: "search", sql: searchRekeys },
 ];
 
 /**
